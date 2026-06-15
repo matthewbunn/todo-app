@@ -1,0 +1,8 @@
+# Runtime data — never commit the live database
+data/
+*.db
+*.sqlite
+*.sqlite3
+__pycache__/
+*.pyc
+.git-credentials

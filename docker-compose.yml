@@ -1,0 +1,13 @@
+services:
+  todo:
+    build: .
+    image: todo-app:latest
+    container_name: todo-app
+    restart: unless-stopped
+    ports:
+      - "8080:8080"          # host:container — change the left side to pick another port
+    volumes:
+      - ./data:/data         # change left side to your host data path
+    environment:
+      - DB_PATH=/data/todo.db
+      - PORT=8080
