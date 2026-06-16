@@ -43,10 +43,14 @@ combinations as one-click **views**.
 ![Analytics](docs/analytics.png)
 
 ### 🎨 Themes
-Pick a theme (System, Light, Dark, Midnight, Nord, Solarized, Forest, Grape) in
-Settings → Appearance. It applies to the web app and the desktop client.
+Pick a theme in Settings → Appearance — System, Light, Dark, Midnight, Nord,
+Solarized, Forest, or Grape. It applies to the web app and the desktop client.
 
-![Midnight theme](docs/board-midnight.png)
+| Light | Nord |
+|:-----:|:----:|
+| ![Light theme](docs/theme-light.png) | ![Nord theme](docs/theme-nord.png) |
+| **Midnight** | **Grape** |
+| ![Midnight theme](docs/board-midnight.png) | ![Grape theme](docs/theme-grape.png) |
 
 ### 📦 More
 - **Offline-first** web app: keeps working if the server drops, and syncs changes when it's back.
