@@ -22,7 +22,7 @@ ICON_SVG = (
 )
 
 SW_JS = b"""
-const CACHE = 'todo-v5';
+const CACHE = 'todo-v6';
 const SHELL = ['/', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png', '/apple-touch-icon.png'];
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -31,16 +31,25 @@ self.addEventListener('activate', (e) => {
   e.waitUntil(caches.keys().then((ks) => Promise.all(
     ks.filter((k) => k !== CACHE).map((k) => caches.delete(k)))).then(() => self.clients.claim()));
 });
+// Local-first: serve the cached app shell immediately so the PWA opens instantly
+// and fully offline, then refresh the cache in the background so updates land on
+// the next load. Data requests (/api/*) are always left to the page's own
+// offline-first sync layer.
 self.addEventListener('fetch', (e) => {
-  const url = new URL(e.request.url);
-  if (e.request.method !== 'GET' || url.pathname.startsWith('/api/')) return;
-  e.respondWith(
-    fetch(e.request).then((r) => {
-      const copy = r.clone();
-      caches.open(CACHE).then((c) => c.put(e.request, copy)).catch(() => {});
-      return r;
-    }).catch(() => caches.match(e.request).then((m) => m || caches.match('/')))
-  );
+  const req = e.request;
+  const url = new URL(req.url);
+  if (req.method !== 'GET' || url.origin !== self.location.origin || url.pathname.startsWith('/api/')) return;
+  const isNav = req.mode === 'navigate';
+  const key = isNav ? '/' : req;        // every navigation maps to the single-page shell
+  e.respondWith(caches.open(CACHE).then((cache) =>
+    cache.match(key).then((cached) => {
+      const network = fetch(req).then((res) => {
+        if (res && res.ok) cache.put(key, res.clone()).catch(() => {});
+        return res;
+      }).catch(() => cached || (isNav ? cache.match('/') : undefined));
+      return cached || network;          // cache-first; fall through to network when uncached
+    })
+  ));
 });
 """
 
