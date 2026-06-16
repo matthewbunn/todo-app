@@ -610,6 +610,32 @@ const persistQueue = () => { LS.setItem("todo.queue", JSON.stringify(queue)); };
 const saveCache = (s) => { try { LS.setItem("todo.cache", JSON.stringify(s)); } catch (e) {} };
 const loadCache = () => { try { return JSON.parse(LS.getItem("todo.cache")); } catch (e) { return null; } };
 function OfflineError() { this.name = "OfflineError"; this.message = "offline"; }
+const nextTempId = () => { const id = tempSeq--; LS.setItem("todo.tempSeq", String(tempSeq)); return id; };
+const isTempId = (v) => typeof v === "number" && v < 0;
+
+// Reserved temp ids for the bootstrap scaffold — a usable empty board shown when
+// there's no server snapshot yet. Kept clear of the live tempSeq range; sanitized
+// away when the queue first syncs to a real server.
+const BOOT_PROJECT = -1000001;
+const BOOT_COLS = [
+  { id: -1000010, name: "To Do", position: 0, is_done: 0, wip_limit: 0 },
+  { id: -1000011, name: "In Progress", position: 1, is_done: 0, wip_limit: 0 },
+  { id: -1000012, name: "Done", position: 2, is_done: 1, wip_limit: 0 },
+];
+function bootstrapState() {
+  return {
+    projects: [{ id: BOOT_PROJECT, name: "Inbox", color: "#4a7dff", key: "INBX" }],
+    columns: JSON.parse(JSON.stringify(BOOT_COLS)),
+    labels: [], tasks: [], saved_views: [], bootstrap: true,
+  };
+}
+// Local-first base: the cached server snapshot if we have one, else a usable
+// empty board so the app is never a dead end while offline.
+function loadBase() {
+  const c = loadCache();
+  if (c && Array.isArray(c.projects) && c.projects.length) return c;
+  return bootstrapState();
+}
 
 function setOnline(flag) {
   const changed = flag !== online;
@@ -676,14 +702,23 @@ async function mutate(method, path, opts) {
 function enqueue(method, path, body) {
   const op = { method, path, body };
   let result = { ok: true };
-  if (method === "POST" && (path === "/api/tasks" || path === "/api/quickadd")) {
-    op.tempId = tempSeq--; LS.setItem("todo.tempSeq", String(tempSeq));
-    const fields = path === "/api/quickadd" ? { title: (body && body.text) || "" } : body;
-    result = synthTask(op.tempId, fields);
+  if (method === "POST") {
+    if (path === "/api/tasks" || path === "/api/quickadd") {
+      op.tempId = nextTempId();
+      const fields = path === "/api/quickadd" ? { title: (body && body.text) || "" } : body;
+      result = synthTask(op.tempId, fields);
+    } else if (path === "/api/projects") {
+      op.tempId = nextTempId(); result = synthProject(op.tempId, body);
+    } else if (path === "/api/labels") {
+      op.tempId = nextTempId(); result = synthLabel(op.tempId, body);
+    } else if (path === "/api/columns") {
+      op.tempId = nextTempId(); result = synthColumn(op.tempId, body);
+    }
   }
   queue.push(op); persistQueue();
-  const base = loadCache();
-  if (base) { applyOp(base, op); saveCache(base); }
+  // Optimistically apply to the local board (always have a base — bootstrap if needed).
+  const base = loadBase();
+  applyOp(base, op); delete base.bootstrap; saveCache(base);
   updateBanner(); scheduleSync();
   return result;
 }
@@ -697,6 +732,21 @@ function synthTask(id, body) {
     logged_min: 0, blocked_by: [],
   }, body || {});
 }
+function synthProject(id, body) {
+  body = body || {};
+  const name = (body.name || "Project").toString();
+  const key = (body.key || name.replace(/[^A-Za-z0-9]/g, "").slice(0, 4).toUpperCase() || "PRJ");
+  return { id, name, color: body.color || "#4a7dff", key };
+}
+function synthLabel(id, body) {
+  body = body || {};
+  return { id, name: (body.name || "label").toString(), color: body.color || "#7a8089" };
+}
+function synthColumn(id, body) {
+  body = body || {};
+  return { id, name: (body.name || "Column").toString(), position: 9e9,
+    is_done: body.is_done ? 1 : 0, wip_limit: Math.max(0, Number(body.wip_limit) || 0) };
+}
 
 function offlineDetail(id) {
   const t = taskById(id); if (!t) return null;
@@ -704,12 +754,16 @@ function offlineDetail(id) {
     time_logs: [], depends_on: [], blocks: [], logged_min: t.logged_min || 0 });
 }
 
-// Mirror the essential server effects of an op onto a cached state (task CRUD only).
+// Mirror the essential server effects of an op onto a local board snapshot so
+// the UI reflects offline changes immediately (tasks, projects, labels, columns).
 function applyOp(s, op) {
   if (!s || !s.tasks) return;
   const m = op.method, p = op.path, b = op.body || {};
+  s.projects = s.projects || []; s.columns = s.columns || []; s.labels = s.labels || [];
   const doneCol = (s.columns.find(c => c.is_done) || {}).id;
   const firstCol = (s.columns[0] || {}).id;
+
+  // ---- tasks ----
   if (m === "POST" && (p === "/api/tasks" || p === "/api/quickadd")) {
     const fields = p === "/api/quickadd" ? { title: (b.text || "") } : b;
     const t = synthTask(op.tempId, fields);
@@ -729,23 +783,105 @@ function applyOp(s, op) {
     if ("done" in b && !("column_id" in b)) t.column_id = b.done ? doneCol : firstCol;
     if ("column_id" in b && b.column_id != null) t.column_id = b.column_id;
     if ("project_id" in b && b.project_id != null) t.project_id = b.project_id;
+    return;
+  }
+
+  // ---- projects ----
+  if (m === "POST" && p === "/api/projects") { s.projects.push(synthProject(op.tempId, b)); return; }
+  const mp = p.match(/^\/api\/projects\/(-?\d+)$/);
+  if (mp) {
+    const id = Number(mp[1]);
+    if (m === "DELETE") {
+      s.projects = s.projects.filter(x => x.id !== id);
+      const fallback = (s.projects[0] || {}).id;
+      for (const t of s.tasks) if (t.project_id === id) t.project_id = fallback;
+      return;
+    }
+    const pr = s.projects.find(x => x.id === id); if (!pr) return;
+    for (const k of ["name", "color", "key"]) if (k in b) pr[k] = b[k];
+    return;
+  }
+
+  // ---- labels ----
+  if (m === "POST" && p === "/api/labels") { s.labels.push(synthLabel(op.tempId, b)); return; }
+  const ml = p.match(/^\/api\/labels\/(-?\d+)$/);
+  if (ml) {
+    const id = Number(ml[1]);
+    if (m === "DELETE") {
+      s.labels = s.labels.filter(x => x.id !== id);
+      for (const t of s.tasks) if (Array.isArray(t.label_ids)) t.label_ids = t.label_ids.filter(x => x !== id);
+      return;
+    }
+    const lb = s.labels.find(x => x.id === id); if (!lb) return;
+    for (const k of ["name", "color"]) if (k in b) lb[k] = b[k];
+    return;
+  }
+
+  // ---- columns ----
+  if (m === "POST" && p === "/api/columns") {
+    const c = synthColumn(op.tempId, b);
+    c.position = s.columns.length ? Math.max(...s.columns.map(x => x.position || 0)) + 1 : 0;
+    s.columns.push(c); return;
+  }
+  const mc = p.match(/^\/api\/columns\/(-?\d+)$/);
+  if (mc) {
+    const id = Number(mc[1]);
+    if (m === "DELETE") {
+      s.columns = s.columns.filter(x => x.id !== id);
+      const fallback = (s.columns[0] || {}).id;
+      for (const t of s.tasks) if (t.column_id === id) t.column_id = fallback;
+      return;
+    }
+    const cl = s.columns.find(x => x.id === id); if (!cl) return;
+    if ("name" in b) cl.name = b.name;
+    if ("is_done" in b) cl.is_done = b.is_done ? 1 : 0;
+    if ("wip_limit" in b) cl.wip_limit = Math.max(0, Number(b.wip_limit) || 0);
+    return;
   }
 }
 function applyQueue(s) { for (const op of queue) applyOp(s, op); return s; }
 
+// Rewrite a queued op's body so locally-minted temp ids become the real server
+// ids assigned during this sync. Unresolved negatives are the bootstrap scaffold
+// (a default project/column the server already provides) — drop them so the
+// server falls back to its own defaults.
+function remapBody(idmap, body) {
+  if (!body) return body;
+  const b = JSON.parse(JSON.stringify(body));
+  const fix = (v) => (idmap[v] != null ? idmap[v] : v);
+  for (const k of ["project_id", "column_id"]) {
+    if (k in b && b[k] != null) { const r = fix(b[k]); if (isTempId(r)) delete b[k]; else b[k] = r; }
+  }
+  if ("depends_on_id" in b && b.depends_on_id != null) b.depends_on_id = fix(b.depends_on_id);
+  if (Array.isArray(b.label_ids)) b.label_ids = b.label_ids.map(fix).filter(x => !isTempId(x));
+  return b;
+}
+
 async function syncQueue() {
   if (syncing || !online || !queue.length) return;
   syncing = true; updateBanner();
-  const idmap = {};
+  const idmap = {};                       // temp id -> real server id
   while (queue.length) {
     const op = queue[0];
     let path = op.path;
-    const mt = path.match(/^\/api\/tasks\/(-?\d+)(\/.*)?$/);
-    if (mt && idmap[mt[1]] != null) path = "/api/tasks/" + idmap[mt[1]] + (mt[2] || "");
+    const seg = path.match(/^\/api\/(tasks|projects|labels|columns)\/(-?\d+)(\/.*)?$/);
+    if (seg) {
+      const orig = Number(seg[2]);
+      const real = idmap[orig] != null ? idmap[orig] : orig;
+      // PATCH/DELETE/sub-resource targeting an unresolved scaffold id can't be
+      // synced (it never existed on the server) — skip it.
+      if (isTempId(real)) { queue.shift(); persistQueue(); updateBanner(); continue; }
+      path = "/api/" + seg[1] + "/" + real + (seg[3] || "");
+    }
+    const body = remapBody(idmap, op.body);
+    // A dependency on a task that was never created server-side can't be set.
+    if (op.path.endsWith("/deps") && body && isTempId(body.depends_on_id)) {
+      queue.shift(); persistQueue(); updateBanner(); continue;
+    }
     try {
       const res = await fetch(API + path, { method: op.method,
         headers: { "Content-Type": "application/json" },
-        body: op.body ? JSON.stringify(op.body) : undefined });
+        body: body ? JSON.stringify(body) : undefined });
       if (!res.ok && res.status !== 204) { queue.shift(); persistQueue(); continue; }
       const data = res.status === 204 ? null : await res.json();
       if (op.tempId && data && data.id) idmap[op.tempId] = data.id;
@@ -798,28 +934,37 @@ async function boot() {
 }
 
 /* ================= data ================= */
-async function refresh() {
-  // Always fetch the full board (incl. archived) so the local cache is complete for offline use.
-  let base;
-  try {
-    base = await apiGet("/api/state?archived=1");
-    saveCache(base);
-  } catch (e) {
-    if (e && e.name === "OfflineError") {
-      base = loadCache();
-      if (!base) { $("content").innerHTML = '<div class="empty">Offline — open this once while the server is reachable to load your board.</div>'; updateBanner(); return; }
-    } else throw e;
-  }
+// Local-first: paint the board from the local store immediately, then reconcile
+// with the server in the background when it's reachable.
+function renderLocal(base) {
+  base = base || loadBase();
   const view = JSON.parse(JSON.stringify(base));
   applyQueue(view);
-  Object.assign(state, { projects: view.projects, columns: view.columns, labels: view.labels, tasks: view.tasks, saved: view.saved_views });
+  Object.assign(state, {
+    projects: view.projects || [], columns: view.columns || [],
+    labels: view.labels || [], tasks: view.tasks || [], saved: view.saved_views || [],
+  });
   if (!(state.cur in SMART) && state.cur !== "all" && state.cur !== "analytics" &&
       !String(state.cur).startsWith("view:") &&
       !state.projects.some(p => String(p.id) === String(state.cur))) {
     state.cur = "all"; localStorage.setItem("todo.cur", "all");
   }
-  updateBanner();
   render();
+}
+
+async function refresh() {
+  // 1) Instant local paint (last server snapshot, or a usable empty board).
+  renderLocal();
+  updateBanner();
+  // 2) Background reconcile: pull the full board (incl. archived) and re-render.
+  try {
+    const base = await apiGet("/api/state?archived=1");
+    saveCache(base);
+    renderLocal(base);
+  } catch (e) {
+    if (!(e && e.name === "OfflineError")) throw e;   // offline: local board already shown
+  }
+  updateBanner();
   if (online && queue.length) scheduleSync();
 }
 
