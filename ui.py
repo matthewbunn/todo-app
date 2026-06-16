@@ -186,6 +186,8 @@ INDEX_HTML = r"""<!doctype html>
   .views button.active { background: var(--accent); color: #fff; }
   .topbar select { font-size: .85rem; padding: .35rem .4rem; }
   #search { width: 150px; }
+  #navToggle { display: none; font-size: 1.25rem; line-height: 1; padding: .25rem .5rem; }
+  #navScrim { display: none; }
 
   .addbar { display: flex; gap: .5rem; padding: .8rem 1.25rem 0; align-items: center; }
   .addbar input { flex: 1; }
@@ -344,10 +346,49 @@ INDEX_HTML = r"""<!doctype html>
   #login .err { color: var(--danger); font-size: .8rem; margin-bottom: .5rem; min-height: 1rem; }
 
   @media (max-width: 760px) {
-    .sidebar { width: 165px; min-width: 165px; }
+    /* sidebar becomes an off-canvas drawer so content gets the full width */
+    .sidebar {
+      position: fixed; top: 0; left: 0; bottom: 0; width: 80vw; max-width: 300px; min-width: 0;
+      z-index: 45; transform: translateX(-100%); transition: transform .22s ease;
+      box-shadow: 0 0 32px rgba(0,0,0,.45); overflow-y: auto;
+    }
+    body.nav-open .sidebar { transform: none; }
+    #navScrim { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 44; }
+    body.nav-open #navScrim { display: block; }
+    #navToggle { display: inline-flex; align-items: center; }
+    .main { width: 100%; min-width: 0; }
+
+    /* topbar: hamburger + title on the first row, controls wrap below */
+    .topbar { padding: calc(.6rem + env(safe-area-inset-top)) .8rem .6rem; gap: .4rem; }
+    .topbar h2 { font-size: 1.05rem; }
+    .spacer { flex-basis: 100%; height: 0; }            /* force a line break after the title */
+    .topbar select { flex: 1 1 28%; min-width: 0; }
+    #search { width: 100%; order: 9; }
+    .views { order: 8; }
+    #saveViewBtn { order: 7; }
+
+    .addbar { padding: .6rem .8rem 0; flex-wrap: wrap; }
+    .addbar .qh { display: none; }                      /* hide the syntax hint on phones */
+    .content { padding: .8rem .8rem 2rem; }
+
+    /* board: one full-width column at a time */
     .board { flex-direction: column; }
     .col { width: 100%; min-width: 0; }
-    .cal-cell { min-height: 64px; }
+    .addcol { min-width: 0; width: 100%; }
+
+    /* full-screen task modal instead of a centered card that overflows */
+    .overlay { padding: 0; align-items: stretch; }
+    .modal {
+      width: 100vw; max-width: none; min-height: 100vh; max-height: none; border-radius: 0;
+      padding: 1rem; padding-top: calc(.9rem + env(safe-area-inset-top));
+      padding-bottom: calc(1.5rem + env(safe-area-inset-bottom));
+    }
+    .grid4, .grid2 { grid-template-columns: 1fr; }       /* stack fields one per row */
+
+    /* roomier touch targets */
+    .icon-btn, .views button { padding: .5rem .7rem; }
+    .card { padding: .75rem; }
+    .cal-cell { min-height: 56px; }
   }
 
   #offlineBanner {
@@ -373,6 +414,7 @@ INDEX_HTML = r"""<!doctype html>
 </div></div>
 
 <div id="app" style="display:none">
+  <div id="navScrim"></div>
   <div class="sidebar">
     <h1>To-Do</h1>
     <form class="add-proj" id="projForm">
@@ -394,6 +436,7 @@ INDEX_HTML = r"""<!doctype html>
   </div>
   <div class="main">
     <div class="topbar">
+      <button id="navToggle" class="icon-btn" type="button" aria-label="Menu">&#9776;</button>
       <h2 id="title">All Tasks</h2>
       <span id="projActions"></span>
       <span class="spacer"></span>
@@ -1592,7 +1635,7 @@ $("hookForm").onsubmit = async (e) => {
 $("copyFeed").onclick = () => { navigator.clipboard.writeText($("feedUrl").value).then(() => { $("copyFeed").textContent = "Copied!"; setTimeout(() => $("copyFeed").textContent = "Copy URL", 1500); }); };
 
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") { closeModal(); $("setOverlay").classList.remove("open"); return; }
+  if (e.key === "Escape") { closeModal(); $("setOverlay").classList.remove("open"); closeNav(); return; }
   const tag = (document.activeElement || {}).tagName;
   if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
   if (e.key === "n") { e.preventDefault(); openModal(null); }
@@ -1600,6 +1643,14 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "b") { state.view = "board"; localStorage.setItem("todo.view", "board"); render(); }
   if (e.key === "l") { state.view = "list"; localStorage.setItem("todo.view", "list"); render(); }
   if (e.key === "c") { state.view = "calendar"; localStorage.setItem("todo.view", "calendar"); render(); }
+});
+
+/* ===== mobile nav drawer ===== */
+const closeNav = () => document.body.classList.remove("nav-open");
+$("navToggle").onclick = (e) => { e.stopPropagation(); document.body.classList.toggle("nav-open"); };
+$("navScrim").onclick = closeNav;
+document.querySelector(".sidebar").addEventListener("click", (e) => {
+  if (e.target.closest("button.proj")) closeNav();   // close after picking a view/project
 });
 
 boot();
