@@ -69,7 +69,15 @@ docker run -d --name todo -p 8080:8080 -v "$PWD/data:/data" \
   ghcr.io/<owner>/todo-app:latest
 ```
 
-Then open `http://localhost:8080`. Or build locally: `docker build -t todo-app . && docker compose up -d`.
+Then open `http://localhost:8080`. Or with the bundled compose (recommended), which
+also wires up automatic updates:
+
+```bash
+docker compose up -d
+```
+
+To build from source instead, swap `image:` for `build: .` in `docker-compose.yml`
+(or run `docker build -t todo-app .`).
 
 | Env var      | Default               | Purpose                          |
 |--------------|-----------------------|----------------------------------|
@@ -77,11 +85,22 @@ Then open `http://localhost:8080`. Or build locally: `docker build -t todo-app .
 | `DB_PATH`    | `/data/todo.db`       | SQLite database file location    |
 | `ATTACH_DIR` | `/data/attachments`   | Where uploaded files are stored  |
 
+### Automatic updates
+Every push to `main` builds and publishes a fresh image to
+`ghcr.io/<owner>/todo-app:latest` (GitHub Action). To have your server pick those
+up on its own, the bundled `docker-compose.yml` includes a label-scoped
+[Watchtower](https://containrrr.dev/watchtower/) service that polls the registry
+and pulls + restarts the app when a new image appears (every 5 minutes). It only
+touches containers carrying the `com.centurylinklabs.watchtower.enable=true` label,
+so it leaves your other apps alone. Your data lives in the `./data` volume and is
+untouched across updates.
+
 ### Deploy on TrueNAS SCALE (or any container host)
 Create a dataset for storage, then add a **Custom App** pointed at
 `ghcr.io/<owner>/todo-app:latest`, map container port `8080` to a host port, and
-mount your dataset at `/data`. A GitHub Action publishes a new image on every push
-to `main`, so the platform's **Update** button picks up new versions.
+mount your dataset at `/data`. Because it's a registry image, the platform's
+**Update** button picks up new versions — or add the Watchtower service above for
+fully hands-off updates.
 
 ### Files
 - `app.py` — backend (Python 3, stdlib only)

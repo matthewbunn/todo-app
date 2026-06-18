@@ -1,7 +1,8 @@
 services:
   todo:
-    build: .
-    image: todo-app:latest
+    # Prebuilt image, auto-published to GHCR on every push to main.
+    # (To build from source instead, comment out `image` and use `build: .`.)
+    image: ghcr.io/matthewbunn/todo-app:latest
     container_name: todo-app
     restart: unless-stopped
     ports:
@@ -11,3 +12,16 @@ services:
     environment:
       - DB_PATH=/data/todo.db
       - PORT=8080
+    labels:
+      - com.centurylinklabs.watchtower.enable=true
+
+  # Watches the registry and auto-pulls + restarts `todo` when a new image is
+  # published. Label-scoped (--label-enable) so it ONLY touches containers that
+  # opt in above — it won't interfere with your other apps. Checks every 5 min.
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: todo-watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: --label-enable --cleanup --interval 300
