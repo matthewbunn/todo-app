@@ -271,14 +271,15 @@ INDEX_HTML = r"""<!doctype html>
   .cal-dayrow:last-child { border-bottom: 0; }
   .cal-dayrow .key { font-size: .7rem; color: var(--muted); }
   .cal-dayrow.done .t { text-decoration: line-through; opacity: .55; }
-  .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+  .cal-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; }
   .cal-dow { font-size: .7rem; color: var(--muted); text-align: center; padding: .2rem; text-transform: uppercase; }
-  .cal-cell { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; min-height: 92px; padding: .3rem; }
+  .cal-cell { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; min-height: 92px; padding: .3rem; min-width: 0; overflow: hidden; }
   .cal-cell.dim { opacity: .4; }
   .cal-cell.today { border-color: var(--accent); }
   .cal-day { font-size: .72rem; color: var(--muted); margin-bottom: .2rem; }
   .cal-ev { font-size: .68rem; background: var(--hover); border-left: 3px solid var(--accent); border-radius: 4px;
-    padding: .1rem .3rem; margin-bottom: 2px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    padding: .1rem .3rem; margin-bottom: 2px; cursor: pointer; overflow: hidden; overflow-wrap: anywhere;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.25; }
   .cal-ev.done { opacity: .5; text-decoration: line-through; }
   .cal-ev.overdue { border-left-color: #e74c3c; }
 
