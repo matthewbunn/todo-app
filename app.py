@@ -102,7 +102,17 @@ def init_db():
                 recurrence TEXT NOT NULL DEFAULT '',
                 reminder_at TEXT,
                 reminded INTEGER NOT NULL DEFAULT 0,
-                estimate_min INTEGER NOT NULL DEFAULT 0
+                estimate_min INTEGER NOT NULL DEFAULT 0,
+                sprint_id INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS sprints (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                goal TEXT NOT NULL DEFAULT '',
+                start_date TEXT,
+                end_date TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
             CREATE TABLE IF NOT EXISTS subtasks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -198,6 +208,7 @@ def init_db():
             ("reminder_at", "ALTER TABLE tasks ADD COLUMN reminder_at TEXT"),
             ("reminded", "ALTER TABLE tasks ADD COLUMN reminded INTEGER NOT NULL DEFAULT 0"),
             ("estimate_min", "ALTER TABLE tasks ADD COLUMN estimate_min INTEGER NOT NULL DEFAULT 0"),
+            ("sprint_id", "ALTER TABLE tasks ADD COLUMN sprint_id INTEGER"),
         ):
             if col not in tcols:
                 conn.execute(ddl)
@@ -963,6 +974,8 @@ class Handler(BaseHTTPRequestHandler):
             columns = [dict(r) for r in conn.execute("SELECT * FROM columns ORDER BY position")]
             labels = [dict(r) for r in conn.execute("SELECT * FROM labels ORDER BY name")]
             saved = [dict(r) for r in conn.execute("SELECT * FROM saved_views ORDER BY position, id")]
+            sprints = [dict(r) for r in conn.execute(
+                "SELECT * FROM sprints ORDER BY COALESCE(start_date,'') DESC, id DESC")]
             arch_clause = "" if include_archived else " AND archived=0"
             if project == "all":
                 rows = conn.execute(f"SELECT * FROM tasks WHERE 1=1{arch_clause} ORDER BY position").fetchall()
@@ -999,7 +1012,7 @@ class Handler(BaseHTTPRequestHandler):
                 t["logged_min"] = logs.get(t["id"], 0)
                 t["blocked_by"] = blocked.get(t["id"], [])
         self._json(200, {"projects": projects, "columns": columns, "labels": labels,
-                         "tasks": tasks, "saved_views": saved})
+                         "tasks": tasks, "saved_views": saved, "sprints": sprints})
 
     def _stats(self):
         with _lock, db() as conn:
@@ -1079,7 +1092,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _export(self):
         tables = ("projects", "columns", "labels", "tasks", "subtasks", "task_labels",
-                  "comments", "task_deps", "time_logs", "saved_views")
+                  "comments", "task_deps", "time_logs", "saved_views", "sprints")
         with _lock, db() as conn:
             out = {"version": 4}
             for table in tables:
@@ -1182,6 +1195,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._add_dep(self._int(parts[2]), data)
         if parts == ["api", "saved_views"]:
             return self._create_saved_view(data)
+        if parts == ["api", "sprints"]:
+            return self._create_sprint(data)
         if parts == ["api", "webhooks"]:
             return self._create_webhook(data)
         if parts == ["api", "tokens"]:
@@ -1235,6 +1250,19 @@ class Handler(BaseHTTPRequestHandler):
             row = conn.execute("SELECT * FROM projects WHERE id = ?", (cur.lastrowid,)).fetchone()
         return self._json(201, dict(row))
 
+    def _create_sprint(self, data):
+        name = (data.get("name") or "").strip()
+        if not name:
+            return self._json(400, {"error": "name is required"})
+        status = data.get("status") if data.get("status") in ("active", "completed") else "active"
+        with _lock, db() as conn:
+            cur = conn.execute(
+                "INSERT INTO sprints (name, goal, start_date, end_date, status) VALUES (?,?,?,?,?)",
+                (name[:100], str(data.get("goal") or "")[:500], data.get("start_date") or None,
+                 data.get("end_date") or None, status))
+            row = conn.execute("SELECT * FROM sprints WHERE id=?", (cur.lastrowid,)).fetchone()
+        return self._json(201, dict(row))
+
     def _create_column(self, data):
         name = (data.get("name") or "").strip()
         if not name:
@@ -1275,12 +1303,15 @@ class Handler(BaseHTTPRequestHandler):
             "SELECT COALESCE(MAX(position)+1,0) p FROM tasks WHERE project_id=? AND column_id=?",
             (pid, cid)).fetchone()["p"]
         is_done = conn.execute("SELECT is_done FROM columns WHERE id=?", (cid,)).fetchone()["is_done"]
+        spid = self._int(data.get("sprint_id"))
+        if spid is not None and not conn.execute("SELECT 1 FROM sprints WHERE id=?", (spid,)).fetchone():
+            spid = None
         cur = conn.execute(
             "INSERT INTO tasks (title, notes, priority, due_date, project_id, column_id, position, done,"
-            " recurrence, reminder_at, estimate_min, completed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            " recurrence, reminder_at, estimate_min, completed_at, sprint_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (title[:500], str(data.get("notes") or "")[:10000], priority, data.get("due_date") or None,
              pid, cid, pos, is_done, recurrence, data.get("reminder_at") or None,
-             max(0, self._int(data.get("estimate_min")) or 0), now_utc() if is_done else None))
+             max(0, self._int(data.get("estimate_min")) or 0), now_utc() if is_done else None, spid))
         tid = cur.lastrowid
         for lid in data.get("label_ids") or []:
             if conn.execute("SELECT 1 FROM labels WHERE id=?", (self._int(lid),)).fetchone():
@@ -1430,8 +1461,16 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(data, dict) or not all(isinstance(data.get(t), list) for t in req):
             return self._json(400, {"error": "invalid backup file"})
         with _lock, db() as conn:
-            for t in req + ("activity", "task_deps", "time_logs", "saved_views"):
+            for t in req + ("activity", "task_deps", "time_logs", "saved_views", "sprints"):
                 conn.execute(f"DELETE FROM {t}")
+            for r in data.get("sprints", []):
+                conn.execute(
+                    "INSERT INTO sprints (id, name, goal, start_date, end_date, status, created_at)"
+                    " VALUES (?,?,?,?,?,?,?)",
+                    (r.get("id"), str(r.get("name") or "?")[:100], str(r.get("goal") or "")[:500],
+                     r.get("start_date"), r.get("end_date"),
+                     r.get("status") if r.get("status") in ("active", "completed") else "active",
+                     r.get("created_at")))
             for r in data["projects"]:
                 conn.execute("INSERT INTO projects (id, name, color, key, created_at) VALUES (?, ?, ?, ?, ?)",
                              (r.get("id"), str(r.get("name") or "?")[:100], str(r.get("color") or "#4a7dff")[:20],
@@ -1447,14 +1486,15 @@ class Handler(BaseHTTPRequestHandler):
                 conn.execute(
                     "INSERT INTO tasks (id, title, notes, priority, due_date, project_id, column_id,"
                     " position, done, created_at, completed_at, archived, recurrence, reminder_at,"
-                    " estimate_min) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    " estimate_min, sprint_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (r.get("id"), str(r.get("title") or "?")[:500], str(r.get("notes") or "")[:10000],
                      r.get("priority") if r.get("priority") in PRIORITIES else "none",
                      r.get("due_date"), r.get("project_id"), r.get("column_id"), r.get("position") or 0,
                      1 if r.get("done") else 0, r.get("created_at"), r.get("completed_at"),
                      1 if r.get("archived") else 0,
                      r.get("recurrence") if r.get("recurrence") in RECURRENCE else "",
-                     r.get("reminder_at"), max(0, self._int(r.get("estimate_min")) or 0)))
+                     r.get("reminder_at"), max(0, self._int(r.get("estimate_min")) or 0),
+                     self._int(r.get("sprint_id"))))
             for r in data["subtasks"]:
                 conn.execute("INSERT INTO subtasks (id, task_id, title, done, position) VALUES (?, ?, ?, ?, ?)",
                              (r.get("id"), r.get("task_id"), str(r.get("title") or "?")[:300],
@@ -1579,6 +1619,23 @@ class Handler(BaseHTTPRequestHandler):
                 row = conn.execute("SELECT * FROM webhooks WHERE id=?", (sid,)).fetchone()
             return self._json(200, dict(row))
 
+        if kind == "sprints":
+            with _lock, db() as conn:
+                if conn.execute("SELECT 1 FROM sprints WHERE id=?", (sid,)).fetchone() is None:
+                    return self._json(404, {"error": "sprint not found"})
+                if isinstance(data.get("name"), str) and data["name"].strip():
+                    conn.execute("UPDATE sprints SET name=? WHERE id=?", (data["name"].strip()[:100], sid))
+                if isinstance(data.get("goal"), str):
+                    conn.execute("UPDATE sprints SET goal=? WHERE id=?", (data["goal"][:500], sid))
+                if "start_date" in data:
+                    conn.execute("UPDATE sprints SET start_date=? WHERE id=?", (data["start_date"] or None, sid))
+                if "end_date" in data:
+                    conn.execute("UPDATE sprints SET end_date=? WHERE id=?", (data["end_date"] or None, sid))
+                if data.get("status") in ("active", "completed"):
+                    conn.execute("UPDATE sprints SET status=? WHERE id=?", (data["status"], sid))
+                row = conn.execute("SELECT * FROM sprints WHERE id=?", (sid,)).fetchone()
+            return self._json(200, dict(row))
+
         if kind == "tasks":
             event = None
             with _lock, db() as conn:
@@ -1609,6 +1666,12 @@ class Handler(BaseHTTPRequestHandler):
                     conn.execute("UPDATE tasks SET estimate_min=? WHERE id=?",
                                  (max(0, self._int(data["estimate_min"]) or 0), sid))
                     changed.append("estimate")
+                if "sprint_id" in data:
+                    sp = self._int(data["sprint_id"])
+                    if sp is not None and not conn.execute("SELECT 1 FROM sprints WHERE id=?", (sp,)).fetchone():
+                        sp = None
+                    conn.execute("UPDATE tasks SET sprint_id=? WHERE id=?", (sp, sid))
+                    changed.append("sprint")
                 if "archived" in data:
                     conn.execute("UPDATE tasks SET archived=? WHERE id=?", (1 if data["archived"] else 0, sid))
                     changed.append("archived" if data["archived"] else "unarchived")
@@ -1704,6 +1767,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(204)
             if kind == "webhooks":
                 conn.execute("DELETE FROM webhooks WHERE id=?", (sid,))
+                return self._send(204)
+            if kind == "sprints":
+                cur = conn.execute("DELETE FROM sprints WHERE id=?", (sid,))
+                if cur.rowcount == 0:
+                    return self._json(404, {"error": "sprint not found"})
+                conn.execute("UPDATE tasks SET sprint_id=NULL WHERE sprint_id=?", (sid,))
                 return self._send(204)
             if kind == "tokens":
                 conn.execute("DELETE FROM tokens WHERE id=?", (sid,))
