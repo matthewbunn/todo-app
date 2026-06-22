@@ -334,6 +334,12 @@ INDEX_HTML = r"""<!doctype html>
   .md pre code { background: none; padding: 0; }
   .md blockquote { margin: .35em 0; padding-left: .7em; border-left: 3px solid var(--border); color: var(--muted); }
   .md a { color: var(--accent); }
+  .prompt-overlay { align-items: center; z-index: 80; }
+  .prompt-modal { max-width: 420px; }
+  .prompt-msg { font-size: .92rem; margin-bottom: .6rem; }
+  .prompt-modal input { width: 100%; margin-bottom: .9rem; }
+  .prompt-actions { display: flex; justify-content: flex-end; gap: .5rem; }
+  #promptOk { border: 0; border-radius: 8px; background: var(--accent); color: #fff; padding: .45rem 1.1rem; cursor: pointer; }
   .grid4 { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: .6rem; }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: .6rem; }
   .chips { display: flex; flex-wrap: wrap; gap: .35rem; margin-bottom: .4rem; }
@@ -1088,6 +1094,35 @@ function el(tag, cls, text) {
   return e;
 }
 
+/* ================= in-app prompt (window.prompt is unsupported in Electron) ================= */
+function uiPrompt(message, def) {
+  return new Promise((resolve) => {
+    let ov = $("promptOverlay");
+    if (!ov) {
+      ov = el("div", "overlay prompt-overlay"); ov.id = "promptOverlay";
+      ov.innerHTML = '<div class="modal prompt-modal"><div class="prompt-msg" id="promptMsg"></div>' +
+        '<input id="promptInput" autocomplete="off">' +
+        '<div class="prompt-actions"><button type="button" id="promptCancel" class="icon-btn">Cancel</button>' +
+        '<button type="button" id="promptOk">OK</button></div></div>';
+      document.body.appendChild(ov);
+    }
+    const input = $("promptInput");
+    $("promptMsg").textContent = message || "";
+    input.value = def != null ? def : "";
+    ov.classList.add("open");
+    setTimeout(() => { input.focus(); input.select(); }, 0);
+    const done = (val) => {
+      ov.classList.remove("open");
+      $("promptOk").onclick = null; $("promptCancel").onclick = null; input.onkeydown = null; ov.onclick = null;
+      resolve(val);
+    };
+    $("promptOk").onclick = () => done(input.value);
+    $("promptCancel").onclick = () => done(null);
+    input.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); done(input.value); } else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); done(null); } };
+    ov.onclick = (e) => { if (e.target === ov) done(null); };
+  });
+}
+
 /* ================= markdown (safe, dependency-free) ================= */
 function escapeHtml(s) {
   return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -1252,10 +1287,10 @@ function renderTopbar() {
   if (cur) {
     acts.appendChild(el("span", "chip", cur.key));
     const ren = el("button", "icon-btn", "Rename");
-    ren.onclick = async () => { const name = prompt("Rename project", cur.name);
+    ren.onclick = async () => { const name = await uiPrompt("Rename project", cur.name);
       if (name && name.trim()) { await api("/api/projects/" + cur.id, { method: "PATCH", ...jbody({ name }) }); refresh(); } };
     const keyb = el("button", "icon-btn", "Key");
-    keyb.onclick = async () => { const key = prompt("Project key", cur.key);
+    keyb.onclick = async () => { const key = await uiPrompt("Project key", cur.key);
       if (key && key.trim()) { await api("/api/projects/" + cur.id, { method: "PATCH", ...jbody({ key }) }); refresh(); } };
     const del = el("button", "icon-btn danger", "Delete");
     del.onclick = async () => { if (confirm('Delete project "' + cur.name + '" and all its tasks?')) {
@@ -1370,7 +1405,7 @@ function renderBoard(root) {
   }
   if (laneBy === "none") {
     const add = el("button", "addcol", "+ Add column");
-    add.onclick = async () => { const name = prompt("Column name");
+    add.onclick = async () => { const name = await uiPrompt("Column name");
       if (name && name.trim()) { await api("/api/columns", { method: "POST", ...jbody({ name }) }); refresh(); } };
     const board = root.querySelector(".board"); if (board) board.appendChild(add);
   }
@@ -1474,8 +1509,8 @@ function projectMenu(e, p) {
   showMenu(e.clientX, e.clientY, [
     { label: "Open", fn: () => { state.cur = String(p.id); localStorage.setItem("todo.cur", state.cur); closeNav(); refresh(); } },
     { label: "New task here", fn: () => { state.cur = String(p.id); localStorage.setItem("todo.cur", state.cur); openModal(null); } },
-    { label: "Rename…", fn: async () => { const name = prompt("Rename project", p.name); if (name && name.trim()) { await api("/api/projects/" + p.id, { method: "PATCH", ...jbody({ name }) }); refresh(); } } },
-    { label: "Change key…", fn: async () => { const key = prompt("Project key", p.key); if (key && key.trim()) { await api("/api/projects/" + p.id, { method: "PATCH", ...jbody({ key }) }); refresh(); } } },
+    { label: "Rename…", fn: async () => { const name = await uiPrompt("Rename project", p.name); if (name && name.trim()) { await api("/api/projects/" + p.id, { method: "PATCH", ...jbody({ name }) }); refresh(); } } },
+    { label: "Change key…", fn: async () => { const key = await uiPrompt("Project key", p.key); if (key && key.trim()) { await api("/api/projects/" + p.id, { method: "PATCH", ...jbody({ key }) }); refresh(); } } },
     { sep: true },
     { label: "Delete project", cls: "danger", fn: async () => { if (confirm('Delete project "' + p.name + '" and all its tasks?')) { await api("/api/projects/" + p.id, { method: "DELETE" }); if (String(state.cur) === String(p.id)) { state.cur = "all"; localStorage.setItem("todo.cur", "all"); } refresh(); } } },
   ]);
@@ -1497,10 +1532,10 @@ function openColMenu(e, c) {
   const menu = $("colMenu"); menu.innerHTML = "";
   const item = (label, fn, cls) => { const b = el("button", cls || "", label);
     b.onclick = async () => { menu.style.display = "none"; await fn(); }; menu.appendChild(b); };
-  item("Rename", async () => { const name = prompt("Column name", c.name);
+  item("Rename", async () => { const name = await uiPrompt("Column name", c.name);
     if (name && name.trim()) { await api("/api/columns/" + c.id, { method: "PATCH", ...jbody({ name }) }); refresh(); } });
   item("WIP limit" + (c.wip_limit ? " (" + c.wip_limit + ")" : ""), async () => {
-    const v = prompt("WIP limit (0 = none)", String(c.wip_limit));
+    const v = await uiPrompt("WIP limit (0 = none)", String(c.wip_limit));
     if (v !== null) { await api("/api/columns/" + c.id, { method: "PATCH", ...jbody({ wip_limit: Number(v) || 0 }) }); refresh(); } });
   const idx = state.columns.findIndex(x => x.id === c.id);
   if (idx > 0) item("Move left", async () => { await api("/api/columns/" + c.id, { method: "PATCH", ...jbody({ index: idx - 1 }) }); refresh(); });
@@ -1991,7 +2026,7 @@ $("fPrio").onchange = () => { state.fPrio = $("fPrio").value; render(); };
 $("fLabel").onchange = () => { state.fLabel = $("fLabel").value; render(); };
 $("sort").onchange = () => { state.sort = $("sort").value; render(); };
 $("saveViewBtn").onclick = async () => {
-  const name = prompt("Name this view"); if (!name || !name.trim()) return;
+  const name = await uiPrompt("Name this view"); if (!name || !name.trim()) return;
   const config = { fPrio: state.fPrio, fLabel: state.fLabel, sort: state.sort, q: state.q, view: state.view };
   await api("/api/saved_views", { method: "POST", ...jbody({ name, config }) }); refresh();
 };
