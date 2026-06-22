@@ -301,6 +301,7 @@ INDEX_HTML = r"""<!doctype html>
   }
   #colMenu button:hover { background: var(--hover); }
   #colMenu button.danger { color: var(--danger); }
+  #colMenu .menu-sep { height: 1px; background: var(--border); margin: .25rem .15rem; }
 
   .overlay {
     position: fixed; inset: 0; background: rgba(0,0,0,.45); display: none;
@@ -1193,7 +1194,7 @@ function renderSidebar() {
     if (count !== undefined && count !== null) b.append(el("span", "n", String(count)));
     if (onDel) { const x = el("button", "x", "x"); x.onclick = (e) => { e.stopPropagation(); onDel(); }; b.append(x); }
     b.onclick = () => { state.cur = String(id); localStorage.setItem("todo.cur", state.cur); refresh(); };
-    parent.appendChild(b);
+    parent.appendChild(b); return b;
   };
   const vl = $("viewList"); vl.innerHTML = "";
   const totalOpen = state.projects.reduce((s, p) => s + p.open, 0);
@@ -1219,7 +1220,7 @@ function renderSidebar() {
     sv.appendChild(b);
   }
   const pl = $("projList"); pl.innerHTML = "";
-  for (const p of state.projects) mk(pl, p.id, p.name, p.color, p.open);
+  for (const p of state.projects) { const b = mk(pl, p.id, p.name, p.color, p.open); b.oncontextmenu = (e) => projectMenu(e, p); }
 }
 
 /* ================= topbar ================= */
@@ -1414,6 +1415,7 @@ function taskCard(t, manual) {
   card.append(el("div", "key", taskKey(t)), el("div", "t", t.title));
   const m = metaRow(t); if (m.childNodes.length) card.appendChild(m);
   card.onclick = () => openModal(t.id);
+  card.oncontextmenu = (e) => taskMenu(e, t);
   if (manual) {
     card.ondragstart = (e) => { dragId = t.id; card.classList.add("dragging"); e.dataTransfer.setData("text/plain", String(t.id)); e.dataTransfer.effectAllowed = "move"; };
     card.ondragend = () => { dragId = null; card.classList.remove("dragging"); };
@@ -1451,6 +1453,43 @@ async function bulkDelete() {
   if (!confirm("Delete " + bulkSel.size + " task(s)?")) return;
   for (const id of [...bulkSel]) { try { await api("/api/tasks/" + id, { method: "DELETE" }); } catch (e) { if (!(e && e.name === "OfflineError")) throw e; } }
   bulkSel.clear(); refresh();
+}
+
+/* ================= context menus (right-click) ================= */
+function showMenu(x, y, items) {
+  const menu = $("colMenu"); menu.innerHTML = "";
+  for (const it of items) {
+    if (it.sep) { menu.appendChild(el("div", "menu-sep")); continue; }
+    const b = el("button", it.cls || "", it.label);
+    b.onclick = async (ev) => { ev.stopPropagation(); menu.style.display = "none"; await it.fn(); };
+    menu.appendChild(b);
+  }
+  menu.style.display = "block";
+  const mw = menu.offsetWidth || 190, mh = menu.offsetHeight || 10;
+  menu.style.left = Math.max(6, Math.min(x, window.innerWidth - mw - 8)) + "px";
+  menu.style.top = Math.max(6, Math.min(y, window.innerHeight - mh - 8)) + "px";
+}
+function projectMenu(e, p) {
+  e.preventDefault(); e.stopPropagation();
+  showMenu(e.clientX, e.clientY, [
+    { label: "Open", fn: () => { state.cur = String(p.id); localStorage.setItem("todo.cur", state.cur); closeNav(); refresh(); } },
+    { label: "New task here", fn: () => { state.cur = String(p.id); localStorage.setItem("todo.cur", state.cur); openModal(null); } },
+    { label: "Rename…", fn: async () => { const name = prompt("Rename project", p.name); if (name && name.trim()) { await api("/api/projects/" + p.id, { method: "PATCH", ...jbody({ name }) }); refresh(); } } },
+    { label: "Change key…", fn: async () => { const key = prompt("Project key", p.key); if (key && key.trim()) { await api("/api/projects/" + p.id, { method: "PATCH", ...jbody({ key }) }); refresh(); } } },
+    { sep: true },
+    { label: "Delete project", cls: "danger", fn: async () => { if (confirm('Delete project "' + p.name + '" and all its tasks?')) { await api("/api/projects/" + p.id, { method: "DELETE" }); if (String(state.cur) === String(p.id)) { state.cur = "all"; localStorage.setItem("todo.cur", "all"); } refresh(); } } },
+  ]);
+}
+function taskMenu(e, t) {
+  e.preventDefault(); e.stopPropagation();
+  const isDone = isDoneCol(t.column_id);
+  showMenu(e.clientX, e.clientY, [
+    { label: "Open", fn: () => openModal(t.id) },
+    { label: isDone ? "Mark as not done" : "Mark as done", fn: async () => { await api("/api/tasks/" + t.id, { method: "PATCH", ...jbody({ done: !isDone }) }); refresh(); } },
+    { label: t.archived ? "Unarchive" : "Archive", fn: async () => { await api("/api/tasks/" + t.id, { method: "PATCH", ...jbody({ archived: !t.archived }) }); refresh(); } },
+    { sep: true },
+    { label: "Delete task", cls: "danger", fn: async () => { if (confirm("Delete this task?")) { await api("/api/tasks/" + t.id, { method: "DELETE" }); refresh(); } } },
+  ]);
 }
 
 /* ================= column menu ================= */
@@ -1491,7 +1530,7 @@ function renderList(root) {
       cb.onclick = async (e) => { e.stopPropagation(); await api("/api/tasks/" + t.id, { method: "PATCH", ...jbody({ done: cb.checked }) }); refresh(); };
       row.append(cb, el("span", "key", taskKey(t)), el("span", "t", t.title));
       const m = metaRow(t); if (m.childNodes.length) row.appendChild(m);
-      row.onclick = () => openModal(t.id); g.appendChild(row);
+      row.onclick = () => openModal(t.id); row.oncontextmenu = (e) => taskMenu(e, t); g.appendChild(row);
     }
     root.appendChild(g);
   }
@@ -1597,6 +1636,7 @@ function calEvent(t) {
   const over = t.due_date < localToday() && !isDoneCol(t.column_id);
   const ev = el("div", "cal-ev" + (isDoneCol(t.column_id) ? " done" : "") + (over ? " overdue" : ""), t.title);
   ev.onclick = (e) => { e.stopPropagation(); openModal(t.id); };
+  ev.oncontextmenu = (e) => taskMenu(e, t);
   return ev;
 }
 function quickAddOn(iso) { openModal(null); setTimeout(() => { const f = $("fDue"); if (f) f.value = iso; }, 0); }
@@ -1685,7 +1725,7 @@ function renderCalDay(root, ref, byDate) {
     const r = el("div", "cal-dayrow p-" + t.priority + (isDoneCol(t.column_id) ? " done" : ""));
     r.append(el("span", "key", taskKey(t)), el("span", "t", t.title));
     const m = metaRow(t); if (m.childNodes.length) r.appendChild(m);
-    r.onclick = () => openModal(t.id);
+    r.onclick = () => openModal(t.id); r.oncontextmenu = (e) => taskMenu(e, t);
     wrap.appendChild(r);
   }
   root.appendChild(wrap);
@@ -2045,7 +2085,7 @@ $("hookForm").onsubmit = async (e) => {
 $("copyFeed").onclick = () => { navigator.clipboard.writeText($("feedUrl").value).then(() => { $("copyFeed").textContent = "Copied!"; setTimeout(() => $("copyFeed").textContent = "Copy URL", 1500); }); };
 
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") { closeModal(); $("setOverlay").classList.remove("open"); closeNav(); return; }
+  if (e.key === "Escape") { closeModal(); $("setOverlay").classList.remove("open"); closeNav(); $("colMenu").style.display = "none"; return; }
   const tag = (document.activeElement || {}).tagName;
   if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
   if (e.key === "n") { e.preventDefault(); openModal(null); }
